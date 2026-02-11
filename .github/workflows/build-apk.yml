@@ -39,7 +39,9 @@ jobs:
           npm install -g eas-cli
 
       - name: 🚀 Build APK
-        run: eas build -p android --profile preview --local --non-interactive --output=./drive-safe.apk
+        run: |
+          chmod +x android/gradlew
+          eas build -p android --profile preview --local --non-interactive --output=./drive-safe.apk
 
       - name: 📥 Upload APK Artifact
         uses: actions/upload-artifact@v4
