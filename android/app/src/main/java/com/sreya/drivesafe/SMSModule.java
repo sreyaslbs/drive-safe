@@ -1,6 +1,8 @@
 package com.sreya.drivesafe;
 
 import android.telephony.SmsManager;
+import android.telecom.TelecomManager;
+import android.content.Context;
 import com.facebook.react.bridge.ReactApplicationContext;
 import com.facebook.react.bridge.ReactContextBaseJavaModule;
 import com.facebook.react.bridge.ReactMethod;
@@ -45,6 +47,31 @@ public class SMSModule extends ReactContextBaseJavaModule {
             promise.resolve("SMS sent successfully");
         } catch (Exception e) {
             promise.reject("SMS_SEND_FAILED", e.getMessage());
+        }
+    }
+
+    @ReactMethod
+    public void declineCall(Promise promise) {
+        try {
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
+                TelecomManager telecomManager = (TelecomManager) getReactApplicationContext().getSystemService(Context.TELECOM_SERVICE);
+                if (telecomManager != null) {
+                    boolean success = telecomManager.endCall();
+                    if (success) {
+                        promise.resolve("Call declined");
+                    } else {
+                        promise.reject("DECLINE_FAILED", "Could not end call via TelecomManager");
+                    }
+                } else {
+                    promise.reject("TELECOM_MANAGER_NULL", "TelecomManager unavailable");
+                }
+            } else {
+                promise.reject("API_LOW", "Decline call not supported on this Android version");
+            }
+        } catch (SecurityException e) {
+            promise.reject("SECURITY_ERROR", "Missing ANSWER_PHONE_CALLS permission: " + e.getMessage());
+        } catch (Exception e) {
+            promise.reject("ERROR", e.getMessage());
         }
     }
 }

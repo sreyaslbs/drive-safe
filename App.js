@@ -1,73 +1,94 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { StyleSheet, Text, View, TouchableOpacity, SafeAreaView, StatusBar, ScrollView, Animated, Alert, PermissionsAndroid, Platform, Vibration, TextInput } from 'react-native';
-import * as Location from 'expo-location';
+import { StyleSheet, Text, View, TouchableOpacity, SafeAreaView, StatusBar, ScrollView, Animated, Alert, PermissionsAndroid, Platform, Vibration, TextInput, LayoutAnimation, Switch } from 'react-native';
+import * as Notifications from 'expo-notifications';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { callSimulator } from './src/utils/CallLogSimulation';
 import { smsHelper } from './src/utils/SMSHelper';
 import CallDetectorManager from 'react-native-call-detector';
 
+// Configure notifications for background alerts
+Notifications.setNotificationHandler({
+  handleNotification: async () => ({
+    shouldShowAlert: true,
+    shouldPlaySound: true,
+    shouldVibrate: true,
+  }),
+});
+
 export default function App() {
   const [isDriving, setIsDriving] = useState(false);
-  const [logs, setLogs] = useState([]);
-  const [pulseAnim] = useState(new Animated.Value(1));
+  const [logs, setLogs] = useState([]); // Concise logs for current session
   const [activeUrgentAlert, setActiveUrgentAlert] = useState(null);
   const [callDetector, setCallDetector] = useState(null);
+  const [activeTab, setActiveTab] = useState('home'); // 'home', 'history', 'settings'
 
-  // New State for Features
+  // Feature State
   const [customMessage, setCustomMessage] = useState("I'm currently driving and will call you back when it's safe. If this is urgent, please call again.");
-  const [vipContacts, setVipContacts] = useState([]); // Array of strings
+  const [vipContacts, setVipContacts] = useState([]);
   const [newVip, setNewVip] = useState("");
-  const [speed, setSpeed] = useState(0);
-  const [showSettings, setShowSettings] = useState(false);
+  const [autoDecline, setAutoDecline] = useState(false);
+  const [rideHistory, setRideHistory] = useState([]);
+  const [currentTripData, setCurrentTripData] = useState(null);
 
-  const locationSubscription = useRef(null);
+  // Animation values
+  const pulseAnim = useRef(new Animated.Value(1)).current;
+  const fadeAnim = useRef(new Animated.Value(0)).current;
 
-  // GPS Speedometer Logic
+  useEffect(() => {
+    Animated.timing(fadeAnim, {
+      toValue: 1,
+      duration: 800,
+      useNativeDriver: true,
+    }).start();
+
+    loadPersistentData();
+    requestNotificationPermissions();
+  }, []);
+
+  const loadPersistentData = async () => {
+    try {
+      const history = await AsyncStorage.getItem('ride_history');
+      const settings = await AsyncStorage.getItem('app_settings');
+      if (history) setRideHistory(JSON.parse(history));
+      if (settings) {
+        const { msg, vip, decline } = JSON.parse(settings);
+        if (msg) setCustomMessage(msg);
+        if (vip) setVipContacts(vip);
+        if (decline !== undefined) setAutoDecline(decline);
+      }
+    } catch (e) {
+      console.error('Failed to load data', e);
+    }
+  };
+
+  const saveSettings = async (msg, vip, decline) => {
+    try {
+      await AsyncStorage.setItem('app_settings', JSON.stringify({ msg, vip, decline }));
+    } catch (e) { console.error(e); }
+  };
+
+  const requestNotificationPermissions = async () => {
+    const { status } = await Notifications.requestPermissionsAsync();
+    if (status !== 'granted' && Platform.OS !== 'web') {
+      addLog('Notification access restricted', 'info');
+    }
+  };
+
   useEffect(() => {
     if (isDriving) {
-      startLocationTracking();
+      Animated.loop(
+        Animated.sequence([
+          Animated.timing(pulseAnim, { toValue: 1.05, duration: 1000, useNativeDriver: true }),
+          Animated.timing(pulseAnim, { toValue: 1, duration: 1000, useNativeDriver: true }),
+        ])
+      ).start();
+
+      if (Platform.OS === 'android') startCallDetection();
     } else {
-      stopLocationTracking();
-      setSpeed(0);
-    }
-    return () => stopLocationTracking();
-  }, [isDriving]);
-
-  const startLocationTracking = async () => {
-    let { status } = await Location.requestForegroundPermissionsAsync();
-    if (status !== 'granted') {
-      addLog('Location permission denied - Speedometer inactive', 'info');
-      return;
-    }
-
-    locationSubscription.current = await Location.watchPositionAsync(
-      {
-        accuracy: Location.Accuracy.BestForNavigation,
-        timeInterval: 1000,
-        distanceInterval: 1,
-      },
-      (location) => {
-        // Convert m/s to km/h (speed * 3.6)
-        const currentSpeed = Math.round((location.coords.speed || 0) * 3.6);
-        setSpeed(currentSpeed);
-      }
-    );
-  };
-
-  const stopLocationTracking = () => {
-    if (locationSubscription.current) {
-      locationSubscription.current.remove();
-      locationSubscription.current = null;
-    }
-  };
-
-  // Real Call Detection Logic
-  useEffect(() => {
-    if (isDriving && Platform.OS === 'android') {
-      startCallDetection();
-    } else {
+      pulseAnim.setValue(1);
       stopCallDetection();
     }
-    return () => stopCallDetection(); // Cleanup on unmount
+    return () => stopCallDetection();
   }, [isDriving]);
 
   const requestPermissions = async () => {
@@ -76,21 +97,16 @@ export default function App() {
         PermissionsAndroid.PERMISSIONS.READ_PHONE_STATE,
         PermissionsAndroid.PERMISSIONS.READ_CALL_LOG,
         PermissionsAndroid.PERMISSIONS.SEND_SMS,
-        PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
+        PermissionsAndroid.PERMISSIONS.ANSWER_PHONE_CALLS,
       ];
-
-      // READ_PHONE_NUMBERS is required for Android 11+ to get the number
-      if (Platform.Version >= 30) {
-        permissions.push(PermissionsAndroid.PERMISSIONS.READ_PHONE_NUMBERS);
-      }
+      if (Platform.Version >= 33) permissions.push(PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS);
+      if (Platform.Version >= 30) permissions.push(PermissionsAndroid.PERMISSIONS.READ_PHONE_NUMBERS);
 
       const granted = await PermissionsAndroid.requestMultiple(permissions);
-
       return (
         granted[PermissionsAndroid.PERMISSIONS.READ_PHONE_STATE] === PermissionsAndroid.RESULTS.GRANTED &&
         granted[PermissionsAndroid.PERMISSIONS.READ_CALL_LOG] === PermissionsAndroid.RESULTS.GRANTED &&
-        granted[PermissionsAndroid.PERMISSIONS.SEND_SMS] === PermissionsAndroid.RESULTS.GRANTED &&
-        granted[PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION] === PermissionsAndroid.RESULTS.GRANTED
+        granted[PermissionsAndroid.PERMISSIONS.SEND_SMS] === PermissionsAndroid.RESULTS.GRANTED
       );
     }
     return true;
@@ -99,62 +115,70 @@ export default function App() {
   const startCallDetection = async () => {
     const hasPermission = await requestPermissions();
     if (!hasPermission) {
-      Alert.alert('Permission Denied', 'Call detection requires phone state, call log, SMS, and location permissions.');
+      Alert.alert('Permission Required', 'Enable Phone, Call logs, and SMS permissions to protect your drive.');
+      setIsDriving(false);
       return;
     }
 
-    addLog('Call Detector Active', 'status');
-
     const detector = new CallDetectorManager(async (event, number) => {
-      // Modern Android often uses different event names or state strings
-      const isIncoming = event === 'Incoming' || event === 'Ringing';
+      if (event === 'Incoming' || event === 'Ringing') {
+        const displayNum = number || 'Unknown Number';
 
-      if (isIncoming) {
-        const displayNum = number || 'Hidden Number';
-
-        // VIP CHECK: If number is in VIP list, do nothing
         if (number && vipContacts.some(v => number.includes(v.replace(/\s/g, '')))) {
-          addLog(`VIP Call from ${displayNum} - Letting it ring`, 'status');
+          addLog(`VIP Call from ${displayNum} - Ignored`, 'status');
+          updateTripCalls(displayNum, 'VIP Ignored');
           return;
         }
 
-        // Log the incoming call immediately
-        addLog(`Incoming call from: ${displayNum}`, 'info');
+        addLog(`Received Call from ${displayNum}`, 'info');
 
-        if (!number || number === 'Unknown') {
-          addLog('ℹ️ Cannot reply: Number hidden', 'info');
+        if (autoDecline) {
+          addLog(`Declined Call from ${displayNum}`, 'status');
+          smsHelper.declineCallBackground();
         }
 
         const result = callSimulator.handleIncomingCall(number || 'Unknown');
 
         if (result.isUrgent) {
-          // Urgent call - vibrate and show alert
-          addLog('⚠️ URGENT CALL ALERT', 'urgent');
-          setActiveUrgentAlert(number || 'Unknown');
+          addLog(`Seems Urgent Call from ${displayNum}`, 'urgent');
+          setActiveUrgentAlert(displayNum);
+          showUrgentNotification(displayNum);
+          updateTripCalls(displayNum, 'Urgent Alert');
           Vibration.vibrate([0, 500, 200, 500, 200, 1000]);
         } else if (result.shouldSendSMS && number && number !== 'Unknown') {
-          // First call - send background SMS
           try {
-            addLog(`Sending auto-reply to ${number}...`, 'info');
             const res = await smsHelper.sendSMSBackground(number, customMessage);
             if (res.success) {
-              addLog(`✅ Auto-reply sent to ${number}`, 'info');
-            } else {
-              addLog(`❌ SMS failed: ${res.error}`, 'urgent');
+              addLog(`Auto SMS sent to ${displayNum}`, 'info');
+              updateTripCalls(displayNum, autoDecline ? 'Declined & Replied' : 'Replied');
             }
-          } catch (error) {
-            addLog(`❌ SMS Error: ${error.message}`, 'urgent');
-          }
+          } catch (e) { }
         }
       }
-    },
-      true, // readPhoneNumber
-      () => {
-        addLog('Permission denied by user', 'urgent');
-      },
-      { title: 'Phone State Permission', message: 'This app needs access to your phone state to detect calls while driving.' }
-    );
+    }, true);
     setCallDetector(detector);
+  };
+
+  const updateTripCalls = (number, status) => {
+    setCurrentTripData(prev => {
+      if (!prev) return null;
+      return {
+        ...prev,
+        calls: [...prev.calls, { number, status, time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) }]
+      };
+    });
+  };
+
+  const showUrgentNotification = async (number) => {
+    await Notifications.scheduleNotificationAsync({
+      content: {
+        title: "🚨 Urgent Caller",
+        body: `${number} is calling persistently. Please pull over.`,
+        data: { number },
+        priority: Notifications.AndroidNotificationPriority.MAX,
+      },
+      trigger: null,
+    });
   };
 
   const stopCallDetection = () => {
@@ -164,38 +188,47 @@ export default function App() {
     }
   };
 
-  useEffect(() => {
-    if (isDriving) {
-      Animated.loop(
-        Animated.sequence([
-          Animated.timing(pulseAnim, {
-            toValue: 1.1,
-            duration: 1000,
-            useNativeDriver: true,
-          }),
-          Animated.timing(pulseAnim, {
-            toValue: 1,
-            duration: 1000,
-            useNativeDriver: true,
-          }),
-        ])
-      ).start();
-    } else {
-      pulseAnim.setValue(1);
-    }
-  }, [isDriving]);
+  const toggleDrivingMode = async () => {
+    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+    const becomingActive = !isDriving;
 
-  const toggleDrivingMode = () => {
-    setIsDriving(!isDriving);
-    const newStatus = !isDriving;
-    addLog(newStatus ? 'Started Driving' : 'Safely Stopped', 'status');
-    if (!newStatus) setActiveUrgentAlert(null); // Clear alerts on stop
+    if (becomingActive) {
+      setLogs([]); // Clear previous logs
+      setCurrentTripData({
+        id: Date.now().toString(),
+        date: new Date().toLocaleDateString(),
+        startTime: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        calls: []
+      });
+      setIsDriving(true);
+      addLog('Ride Started', 'status');
+    } else {
+      addLog('Ride Ended', 'status');
+      setIsDriving(false);
+      // Save to History
+      if (currentTripData) {
+        const completedTrip = {
+          ...currentTripData,
+          endTime: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        };
+        const newHistory = [completedTrip, ...rideHistory].slice(0, 20);
+        setRideHistory(newHistory);
+        await AsyncStorage.setItem('ride_history', JSON.stringify(newHistory));
+      }
+      setActiveUrgentAlert(null);
+      // Auto-clear logs after stopping is handled by the becomingActive logic above next time we start
+      // But user wanted "After every ride is stopped, logs could be auto cleared"
+      // So let's clear them after a short delay so they can see "Ride Ended"
+      setTimeout(() => {
+        if (!becomingActive) setLogs([]);
+      }, 3000);
+    }
   };
 
   const addLog = (action, type = 'info') => {
     const newLog = {
       id: Date.now().toString(),
-      time: new Date().toLocaleTimeString(),
+      time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
       action,
       type
     };
@@ -204,186 +237,219 @@ export default function App() {
 
   const addVip = () => {
     if (newVip.length > 5 && !vipContacts.includes(newVip)) {
-      setVipContacts([...vipContacts, newVip]);
+      const updated = [...vipContacts, newVip];
+      setVipContacts(updated);
+      saveSettings(customMessage, updated, autoDecline);
       setNewVip("");
     }
   };
 
-  const removeVip = (num) => {
-    setVipContacts(vipContacts.filter(v => v !== num));
-  };
+  const renderHome = () => (
+    <View style={styles.tabContent}>
+      <View style={styles.hero}>
+        <TouchableOpacity activeOpacity={0.9} onPress={toggleDrivingMode}>
+          <Animated.View style={[
+            styles.mainButton,
+            { transform: [{ scale: pulseAnim }], borderColor: isDriving ? '#f43f5e' : '#10b981' }
+          ]}>
+            <View style={[styles.buttonInner, { backgroundColor: isDriving ? '#f43f5e15' : '#10b98115' }]}>
+              <Text style={[styles.buttonText, { color: isDriving ? '#f43f5e' : '#10b981' }]}>
+                {isDriving ? 'STOP' : 'START'}
+              </Text>
+            </View>
+          </Animated.View>
+        </TouchableOpacity>
+        <Text style={[styles.statusHint, { color: isDriving ? '#f43f5e' : '#94a3b8' }]}>
+          {isDriving ? 'MONITORING CALLS' : 'SYSTEM STANDBY'}
+        </Text>
+      </View>
+
+      <View style={styles.logSection}>
+        {logs.length > 0 && (
+          <View style={styles.logFeed}>
+            {logs.map(log => (
+              <View key={log.id} style={styles.minimalLog}>
+                <Text style={[styles.logActionText, log.type === 'urgent' && styles.logUrgentText]}>
+                  • {log.action}
+                </Text>
+              </View>
+            ))}
+          </View>
+        )}
+      </View>
+    </View>
+  );
+
+  const renderHistory = () => (
+    <ScrollView style={styles.tabContent} showsVerticalScrollIndicator={false}>
+      <Text style={styles.tabTitle}>Ride History</Text>
+      {rideHistory.length === 0 ? (
+        <Text style={styles.emptyText}>No history available.</Text>
+      ) : (
+        rideHistory.map(ride => (
+          <View key={ride.id} style={styles.historyCard}>
+            <View style={styles.historyTop}>
+              <Text style={styles.historyDate}>{ride.date}</Text>
+              <Text style={styles.historyDuration}>{ride.startTime} - {ride.endTime}</Text>
+            </View>
+            {ride.calls.map((call, idx) => (
+              <View key={idx} style={styles.historyCallRow}>
+                <Text style={styles.historyCallNum}>{call.number}</Text>
+                <Text style={[styles.historyCallStatus, { color: call.status.includes('Declined') ? '#f43f5e' : '#3b82f6' }]}>{call.status}</Text>
+              </View>
+            ))}
+          </View>
+        ))
+      )}
+    </ScrollView>
+  );
+
+  const renderSettings = () => (
+    <ScrollView style={styles.tabContent} showsVerticalScrollIndicator={false}>
+      <Text style={styles.tabTitle}>Settings</Text>
+
+      <View style={styles.settingsCard}>
+        <View style={styles.settingRow}>
+          <View>
+            <Text style={styles.settingLabel}>Auto-Decline Calls</Text>
+            <Text style={styles.settingSub}>Hang up the first call automatically</Text>
+          </View>
+          <Switch
+            value={autoDecline}
+            onValueChange={(val) => { setAutoDecline(val); saveSettings(customMessage, vipContacts, val); }}
+            trackColor={{ false: '#334155', true: '#3b82f6' }}
+            thumbColor="#f8fafc"
+          />
+        </View>
+
+        <View style={styles.spacer} />
+
+        <Text style={styles.inputLabel}>AUTO-REPLY TEXT</Text>
+        <TextInput
+          style={styles.textInput}
+          multiline
+          value={customMessage}
+          onChangeText={(val) => { setCustomMessage(val); saveSettings(val, vipContacts, autoDecline); }}
+        />
+
+        <View style={styles.spacer} />
+
+        <Text style={styles.inputLabel}>VIP WHITELIST</Text>
+        <View style={styles.vipInputRow}>
+          <TextInput
+            style={styles.vipInput}
+            value={newVip}
+            onChangeText={setNewVip}
+            placeholder="Phone number..."
+            placeholderTextColor="#64748b"
+            keyboardType="phone-pad"
+          />
+          <TouchableOpacity style={styles.addBtn} onPress={addVip}>
+            <Text style={styles.addBtnText}>ADD</Text>
+          </TouchableOpacity>
+        </View>
+
+        <View style={styles.vipList}>
+          {vipContacts.map(vip => (
+            <View key={vip} style={styles.vipItem}>
+              <Text style={styles.vipNumText}>{vip}</Text>
+              <TouchableOpacity onPress={() => {
+                const updated = vipContacts.filter(v => v !== vip);
+                setVipContacts(updated);
+                saveSettings(customMessage, updated, autoDecline);
+              }}>
+                <Text style={styles.removeVip}>✕</Text>
+              </TouchableOpacity>
+            </View>
+          ))}
+        </View>
+      </View>
+    </ScrollView>
+  );
 
   return (
     <SafeAreaView style={styles.container}>
       <StatusBar barStyle="light-content" />
 
       {activeUrgentAlert && (
-        <View style={styles.urgentBanner}>
-          <View style={styles.urgentBannerContent}>
-            <View>
-              <Text style={styles.urgentText}>⚠️ URGENT CALL FROM {activeUrgentAlert}</Text>
-              <Text style={styles.urgentSubtext}>Safely pull over to respond.</Text>
-            </View>
-            <TouchableOpacity
-              onPress={() => setActiveUrgentAlert(null)}
-              style={styles.dismissButton}
-            >
-              <Text style={styles.dismissButtonText}>✕</Text>
-            </TouchableOpacity>
-          </View>
+        <View style={styles.urgentAlert}>
+          <Text style={styles.urgentAlertText}>URGENT CALL FROM {activeUrgentAlert}</Text>
+          <TouchableOpacity onPress={() => setActiveUrgentAlert(null)}>
+            <Text style={styles.dismissText}>DISMISS</Text>
+          </TouchableOpacity>
         </View>
       )}
 
-      {/* Speedometer Header */}
-      {isDriving ? (
-        <View style={styles.speedometerContainer}>
-          <Text style={styles.speedValue}>{speed}</Text>
-          <Text style={styles.speedUnit}>KM/H</Text>
-        </View>
-      ) : (
-        <View style={styles.header}>
-          <Text style={styles.headerTitle}>DRIVE SAFE</Text>
-          <Text style={styles.headerSubtitle}>Arrive Alive. Stay Focused.</Text>
-        </View>
-      )}
+      <Animated.View style={[styles.main, { opacity: fadeAnim }]}>
+        {activeTab === 'home' && renderHome()}
+        {activeTab === 'history' && renderHistory()}
+        {activeTab === 'settings' && renderSettings()}
 
-      <ScrollView style={styles.content} showsVerticalScrollIndicator={false}>
-        <View style={styles.statusCard}>
-          <Text style={styles.statusLabel}>Current Status</Text>
-          <Text style={[styles.statusValue, { color: isDriving ? '#ef4444' : '#10b981' }]}>
-            {isDriving ? 'DRIVING' : 'PARKED'}
-          </Text>
-        </View>
-
-        <TouchableOpacity
-          activeOpacity={0.8}
-          onPress={toggleDrivingMode}
-          style={styles.toggleContainer}
-        >
-          <Animated.View style={[
-            styles.toggleButton,
-            { backgroundColor: isDriving ? '#ef4444' : '#10b981' }
-          ]}>
-            <Text style={styles.toggleText}>
-              {isDriving ? 'STOP' : 'START'}
-            </Text>
-          </Animated.View>
-        </TouchableOpacity>
-
-        {/* Settings Toggle */}
-        {!isDriving && (
-          <TouchableOpacity
-            style={styles.settingsBtn}
-            onPress={() => setShowSettings(!showSettings)}
-          >
-            <Text style={styles.settingsBtnText}>{showSettings ? 'Close Settings' : 'App Settings'}</Text>
+        <View style={styles.navBar}>
+          <TouchableOpacity onPress={() => setActiveTab('home')} style={styles.navItem}>
+            <Text style={[styles.navIcon, activeTab === 'home' && styles.activeNav]}>DRIVE</Text>
           </TouchableOpacity>
-        )}
-
-        {showSettings && !isDriving && (
-          <View style={styles.settingsCard}>
-            <Text style={styles.sectionTitle}>Auto-Reply Message</Text>
-            <TextInput
-              style={styles.input}
-              multiline
-              value={customMessage}
-              onChangeText={setCustomMessage}
-              placeholder="Enter auto-reply text..."
-              placeholderTextColor="#475569"
-            />
-
-            <Text style={[styles.sectionTitle, { marginTop: 20 }]}>VIP Contacts (No Auto-Reply)</Text>
-            <View style={styles.addRow}>
-              <TextInput
-                style={[styles.input, { flex: 1, marginBottom: 0 }]}
-                value={newVip}
-                onChangeText={setNewVip}
-                keyboardType="phone-pad"
-                placeholder="Phone number..."
-                placeholderTextColor="#475569"
-              />
-              <TouchableOpacity style={styles.addBtn} onPress={addVip}>
-                <Text style={styles.addBtnText}>ADD</Text>
-              </TouchableOpacity>
-            </View>
-
-            {vipContacts.map(vip => (
-              <View key={vip} style={styles.vipItem}>
-                <Text style={styles.vipText}>{vip}</Text>
-                <TouchableOpacity onPress={() => removeVip(vip)}>
-                  <Text style={styles.removeText}>Remove</Text>
-                </TouchableOpacity>
-              </View>
-            ))}
-          </View>
-        )}
-
-        <View style={styles.logsHeader}>
-          <Text style={styles.logsTitle}>Trip Activity</Text>
-          <TouchableOpacity onPress={() => setLogs([])}>
-            <Text style={styles.clearText}>Clear</Text>
+          <TouchableOpacity onPress={() => setActiveTab('history')} style={styles.navItem}>
+            <Text style={[styles.navIcon, activeTab === 'history' && styles.activeNav]}>HISTORY</Text>
+          </TouchableOpacity>
+          <TouchableOpacity onPress={() => setActiveTab('settings')} style={styles.navItem}>
+            <Text style={[styles.navIcon, activeTab === 'settings' && styles.activeNav]}>CONFIG</Text>
           </TouchableOpacity>
         </View>
-
-        {logs.length === 0 ? (
-          <Text style={styles.emptyText}>No activity recorded yet.</Text>
-        ) : (
-          logs.map(log => (
-            <View key={log.id} style={[
-              styles.logItem,
-              log.type === 'urgent' && styles.logItemUrgent
-            ]}>
-              <Text style={styles.logTime}>{log.time}</Text>
-              <Text style={[
-                styles.logAction,
-                log.type === 'urgent' && { color: '#fecaca' }
-              ]}>{log.action}</Text>
-            </View>
-          ))
-        )}
-      </ScrollView>
+      </Animated.View>
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#0f172a' },
-  urgentBanner: { backgroundColor: '#ef4444', padding: 16 },
-  urgentBannerContent: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
-  urgentText: { color: '#fff', fontWeight: '900', fontSize: 16 },
-  urgentSubtext: { color: '#fee2e2', fontSize: 12, marginTop: 2 },
-  dismissButton: { backgroundColor: 'rgba(255, 255, 255, 0.2)', width: 32, height: 32, borderRadius: 16, justifyContent: 'center', alignItems: 'center' },
-  dismissButtonText: { color: '#fff', fontSize: 20, fontWeight: 'bold' },
-  header: { padding: 24, alignItems: 'center', borderBottomWidth: 1, borderBottomColor: '#1e293b' },
-  headerTitle: { fontSize: 28, fontWeight: '900', color: '#f8fafc', letterSpacing: 4 },
-  headerSubtitle: { fontSize: 14, color: '#94a3b8', marginTop: 4 },
-  speedometerContainer: { padding: 20, alignItems: 'center', backgroundColor: '#1e293b', margin: 20, borderRadius: 100, width: 200, height: 200, alignSelf: 'center', justifyContent: 'center', borderWidth: 4, borderColor: '#3b82f6' },
-  speedValue: { fontSize: 80, fontWeight: '900', color: '#3b82f6' },
-  speedUnit: { fontSize: 18, color: '#94a3b8', fontWeight: 'bold' },
-  content: { flex: 1, padding: 24 },
-  statusCard: { backgroundColor: '#1e293b', padding: 20, borderRadius: 20, alignItems: 'center', marginBottom: 30 },
-  statusLabel: { color: '#94a3b8', fontSize: 12, fontWeight: '600', textTransform: 'uppercase' },
-  statusValue: { fontSize: 32, fontWeight: '800', marginTop: 4 },
-  toggleContainer: { alignItems: 'center', marginBottom: 20 },
-  toggleButton: { width: 140, height: 140, borderRadius: 70, alignItems: 'center', justifyContent: 'center', elevation: 10 },
-  toggleText: { color: '#fff', fontSize: 28, fontWeight: '900' },
-  settingsBtn: { backgroundColor: '#334155', padding: 12, borderRadius: 12, alignItems: 'center', marginBottom: 20 },
-  settingsBtnText: { color: '#f8fafc', fontWeight: '600' },
-  settingsCard: { backgroundColor: '#1e293b', padding: 16, borderRadius: 16, marginBottom: 20 },
-  sectionTitle: { color: '#f8fafc', fontSize: 16, fontWeight: 'bold', marginBottom: 10 },
-  input: { backgroundColor: '#0f172a', color: '#f8fafc', padding: 12, borderRadius: 8, marginBottom: 10, textAlignVertical: 'top' },
-  addRow: { flexDirection: 'row', marginBottom: 10 },
-  addBtn: { backgroundColor: '#3b82f6', paddingHorizontal: 20, justifyContent: 'center', borderRadius: 8, marginLeft: 10 },
+  container: { flex: 1, backgroundColor: '#020617' },
+  main: { flex: 1 },
+  tabContent: { flex: 1, padding: 24, paddingBottom: 100 },
+  tabTitle: { fontSize: 28, fontWeight: '900', color: '#f8fafc', marginBottom: 24 },
+
+  // Home
+  hero: { alignItems: 'center', marginTop: 60, marginBottom: 40 },
+  mainButton: { width: 180, height: 180, borderRadius: 90, borderWidth: 1.5, justifyContent: 'center', alignItems: 'center' },
+  buttonText: { fontSize: 32, fontWeight: '900', letterSpacing: 2 },
+  statusHint: { marginTop: 20, fontSize: 11, fontWeight: '800', letterSpacing: 1.5 },
+  logSection: { flex: 1 },
+  minimalLog: { marginBottom: 12 },
+  logActionText: { color: '#94a3b8', fontSize: 15, fontWeight: '500' },
+  logUrgentText: { color: '#f43f5e', fontWeight: 'bold' },
+
+  // History
+  historyCard: { backgroundColor: '#1e293b60', padding: 20, borderRadius: 24, marginBottom: 16, borderTopWidth: 1, borderTopColor: '#ffffff08' },
+  historyTop: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 15, borderBottomWidth: 1, borderBottomColor: '#ffffff05', paddingBottom: 10 },
+  historyDate: { color: '#f8fafc', fontWeight: 'bold' },
+  historyDuration: { color: '#64748b', fontSize: 11 },
+  historyCallRow: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 8 },
+  historyCallNum: { color: '#cbd5e1', fontSize: 13 },
+  historyCallStatus: { fontSize: 11, fontWeight: 'bold' },
+
+  // Settings
+  settingsCard: { backgroundColor: '#1e293b60', padding: 24, borderRadius: 24 },
+  settingRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  settingLabel: { color: '#f8fafc', fontSize: 16, fontWeight: 'bold' },
+  settingSub: { color: '#64748b', fontSize: 11, marginTop: 2 },
+  spacer: { height: 30 },
+  inputLabel: { color: '#64748b', fontSize: 10, fontWeight: '900', marginBottom: 12, letterSpacing: 1 },
+  textInput: { backgroundColor: '#0f172a', color: '#f8fafc', padding: 16, borderRadius: 16, fontSize: 14, minHeight: 100, textAlignVertical: 'top' },
+  vipInputRow: { flexDirection: 'row', gap: 10 },
+  vipInput: { flex: 1, backgroundColor: '#0f172a', color: '#f8fafc', padding: 14, borderRadius: 12 },
+  addBtn: { backgroundColor: '#3b82f6', paddingHorizontal: 20, borderRadius: 12, justifyContent: 'center' },
   addBtnText: { color: '#fff', fontWeight: 'bold' },
-  vipItem: { flexDirection: 'row', justifyContent: 'space-between', padding: 10, borderBottomWidth: 1, borderBottomColor: '#334155' },
-  vipText: { color: '#f8fafc' },
-  removeText: { color: '#ef4444', fontSize: 12 },
-  logsHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, marginTop: 10 },
-  logsTitle: { fontSize: 18, fontWeight: '700', color: '#f8fafc' },
-  clearText: { color: '#3b82f6', fontSize: 14 },
-  logItem: { backgroundColor: '#1e293b', padding: 16, borderRadius: 12, marginBottom: 10, flexDirection: 'row', justifyContent: 'space-between' },
-  logItemUrgent: { backgroundColor: '#450a0a', borderLeftWidth: 4, borderLeftColor: '#ef4444' },
-  logTime: { color: '#94a3b8', fontSize: 10 },
-  logAction: { color: '#f8fafc', fontSize: 13, flex: 1, marginLeft: 10 },
-  emptyText: { textAlign: 'center', color: '#475569', marginTop: 10, fontStyle: 'italic' },
+  vipList: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginTop: 20 },
+  vipItem: { backgroundColor: '#334155', paddingHorizontal: 15, paddingVertical: 10, borderRadius: 12, flexDirection: 'row', gap: 10, alignItems: 'center' },
+  vipNumText: { color: '#f8fafc', fontSize: 13, fontWeight: '600' },
+  removeVip: { color: '#94a3b8', fontSize: 14 },
+
+  // Shared
+  navBar: { position: 'absolute', bottom: 30, left: 30, right: 30, height: 70, backgroundColor: '#1e293b', borderRadius: 35, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-around', elevation: 10 },
+  navItem: { padding: 10 },
+  navIcon: { color: '#64748b', fontWeight: '900', fontSize: 11, letterSpacing: 1 },
+  activeNav: { color: '#3b82f6' },
+  urgentAlert: { backgroundColor: '#f43f5e', padding: 15, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  urgentAlertText: { color: '#fff', fontWeight: 'bold', fontSize: 13 },
+  dismissText: { color: '#fff', fontSize: 11, fontWeight: '900', opacity: 0.8 },
+  emptyText: { color: '#475569', textAlign: 'center', marginTop: 40, fontStyle: 'italic' },
 });

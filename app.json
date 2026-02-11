@@ -24,6 +24,7 @@
         "SEND_SMS",
         "RECEIVE_SMS",
         "CALL_PHONE",
+        "ANSWER_PHONE_CALLS",
         "ACCESS_FINE_LOCATION",
         "ACCESS_COARSE_LOCATION"
       ],

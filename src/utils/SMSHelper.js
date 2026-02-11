@@ -72,6 +72,23 @@ class SMSHelper {
             return { success: false, error: error.message || 'Unknown native error' };
         }
     }
+
+    /**
+     * Rejects/Ends an incoming call using native module
+     */
+    async declineCallBackground() {
+        try {
+            const { NativeModules } = require('react-native');
+            const { SMSModule } = NativeModules;
+            if (SMSModule && SMSModule.declineCall) {
+                await SMSModule.declineCall();
+                return { success: true };
+            }
+            return { success: false, error: 'Decline feature not available' };
+        } catch (error) {
+            return { success: false, error: error.message };
+        }
+    }
 }
 
 export const smsHelper = new SMSHelper();
