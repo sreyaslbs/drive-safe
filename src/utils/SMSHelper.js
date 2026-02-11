@@ -54,8 +54,11 @@ class SMSHelper {
             const { SMSModule } = NativeModules;
 
             if (!SMSModule) {
-                console.warn('SMSModule not available, falling back to Linking API');
-                return this.sendAutoReply(phoneNumber, message);
+                return { success: false, error: 'Native SMSModule not found' };
+            }
+
+            if (!phoneNumber || phoneNumber === 'Unknown') {
+                return { success: false, error: 'Invalid or hidden phone number' };
             }
 
             const cleanNumber = phoneNumber.replace(/[^\d+]/g, '');
@@ -63,10 +66,10 @@ class SMSHelper {
             const smsMessage = message || defaultMessage;
 
             await SMSModule.sendSMS(cleanNumber, smsMessage);
-            return true;
+            return { success: true };
         } catch (error) {
             console.error('Error sending background SMS:', error);
-            return false;
+            return { success: false, error: error.message || 'Unknown native error' };
         }
     }
 }

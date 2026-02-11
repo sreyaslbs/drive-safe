@@ -38,7 +38,8 @@ export default function App() {
 
       return (
         granted[PermissionsAndroid.PERMISSIONS.READ_PHONE_STATE] === PermissionsAndroid.RESULTS.GRANTED &&
-        granted[PermissionsAndroid.PERMISSIONS.READ_CALL_LOG] === PermissionsAndroid.RESULTS.GRANTED
+        granted[PermissionsAndroid.PERMISSIONS.READ_CALL_LOG] === PermissionsAndroid.RESULTS.GRANTED &&
+        granted[PermissionsAndroid.PERMISSIONS.SEND_SMS] === PermissionsAndroid.RESULTS.GRANTED
       );
     }
     return true;
@@ -47,7 +48,7 @@ export default function App() {
   const startCallDetection = async () => {
     const hasPermission = await requestPermissions();
     if (!hasPermission) {
-      Alert.alert('Permission Denied', 'Call detection requires phone state and call log permissions.');
+      Alert.alert('Permission Denied', 'Call detection requires phone state, call log, and SMS permissions.');
       return;
     }
 
@@ -55,32 +56,36 @@ export default function App() {
 
     const detector = new CallDetectorManager(async (event, number) => {
       // Modern Android often uses different event names or state strings
-      const isIncoming = event === 'Incoming' || event === 'Ringing' || event === 'Offhook';
+      const isIncoming = event === 'Incoming' || event === 'Ringing';
 
-      addLog(`Detector: ${event}${number ? ' (' + number + ')' : ''}`, 'info');
+      if (isIncoming) {
+        // Log the incoming call immediately
+        const displayNum = number || 'Hidden Number';
+        addLog(`Incoming call from: ${displayNum}`, 'info');
 
-      if (event === 'Incoming' || event === 'Ringing') {
+        if (!number || number === 'Unknown') {
+          addLog('ℹ️ Cannot send SMS: Number is hidden or permission missing', 'info');
+        }
+
         const result = callSimulator.handleIncomingCall(number || 'Unknown');
-        addLog(result.message, result.isUrgent ? 'urgent' : 'info');
 
         if (result.isUrgent) {
-          // Urgent call - vibrate in pattern and show alert
+          // Urgent call - vibrate and show alert
+          addLog('⚠️ URGENT CALL ALERT', 'urgent');
           setActiveUrgentAlert(number || 'Unknown');
-          // Vibration pattern: [wait, vibrate, wait, vibrate, ...]
-          // Pattern: vibrate 500ms, pause 200ms, vibrate 500ms, pause 200ms, vibrate 1000ms
           Vibration.vibrate([0, 500, 200, 500, 200, 1000]);
-          addLog('⚠️ URGENT CALL ALERT - Please pull over safely', 'urgent');
         } else if (result.shouldSendSMS && number && number !== 'Unknown') {
-          // First call - send auto-reply SMS
+          // First call - send background SMS
           try {
-            const smsSent = await smsHelper.sendSMSBackground(number);
-            if (smsSent) {
-              addLog(`Auto-reply SMS sent to ${number}`, 'info');
+            addLog(`Sending auto-reply to ${number}...`, 'info');
+            const result = await smsHelper.sendSMSBackground(number);
+            if (result.success) {
+              addLog(`✅ Auto-reply SMS sent to ${number}`, 'info');
             } else {
-              addLog(`SMS auto-reply prepared for ${number}`, 'info');
+              addLog(`❌ SMS failed: ${result.error}`, 'urgent');
             }
           } catch (error) {
-            addLog(`Could not send SMS: ${error.message}`, 'info');
+            addLog(`❌ SMS Error: ${error.message}`, 'urgent');
           }
         }
       }
