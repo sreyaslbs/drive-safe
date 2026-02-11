@@ -5,25 +5,39 @@
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
-    "userInterfaceStyle": "light",
-    "newArchEnabled": true,
+    "userInterfaceStyle": "dark",
+    "newArchEnabled": false,
     "splash": {
       "image": "./assets/splash-icon.png",
       "resizeMode": "contain",
-      "backgroundColor": "#ffffff"
+      "backgroundColor": "#0f172a"
     },
     "ios": {
       "supportsTablet": true
     },
     "android": {
+      "package": "com.sreya.drivesafe",
+      "permissions": [
+        "READ_PHONE_STATE",
+        "READ_PHONE_NUMBERS",
+        "READ_CALL_LOG",
+        "SEND_SMS",
+        "RECEIVE_SMS",
+        "CALL_PHONE"
+      ],
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
-        "backgroundColor": "#ffffff"
+        "backgroundColor": "#0f172a"
       },
       "edgeToEdgeEnabled": true
     },
     "web": {
       "favicon": "./assets/favicon.png"
+    },
+    "extra": {
+      "eas": {
+        "projectId": "b4fae68e-5896-4e26-9717-8c66cb8b91d7"
+      }
     }
   }
 }

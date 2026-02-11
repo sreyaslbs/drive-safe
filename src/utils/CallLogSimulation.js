@@ -6,13 +6,13 @@
 class CallLogSimulation {
     constructor() {
         this.callHistory = {}; // Key: phoneNumber, Value: [timestamps]
-        this.URGENCY_THRESHOLD_MS = 3 * 60 * 1000; // 3 minutes
+        this.URGENCY_THRESHOLD_MS = 2 * 60 * 1000; // 2 minutes
     }
 
     /**
-     * Simulates an incoming call event.
+     * Handles an incoming call event.
      * @param {string} phoneNumber 
-     * @returns {Object} result - { isUrgent: boolean, message: string }
+     * @returns {Object} result - { isUrgent: boolean, message: string, shouldSendSMS: boolean }
      */
     handleIncomingCall(phoneNumber) {
         const now = Date.now();
@@ -29,9 +29,10 @@ class CallLogSimulation {
             isUrgent,
             phoneNumber,
             timestamp: now,
+            shouldSendSMS: !isUrgent, // Send SMS only for first call, not urgent repeats
             message: isUrgent
-                ? `EMERGENCY: ${phoneNumber} called again within 3 mins!`
-                : `Auto-replied to ${phoneNumber}`
+                ? `URGENT: ${phoneNumber} called again within 2 mins!`
+                : `Incoming call from ${phoneNumber}`
         };
     }
 

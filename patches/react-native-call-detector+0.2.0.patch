@@ -1,0 +1,176 @@
+diff --git a/node_modules/react-native-call-detector/android/build.gradle b/node_modules/react-native-call-detector/android/build.gradle
+index bd62c97..b0e65b1 100644
+--- a/node_modules/react-native-call-detector/android/build.gradle
++++ b/node_modules/react-native-call-detector/android/build.gradle
+@@ -1,15 +1,15 @@
+ apply plugin: 'com.android.library'
+ 
+ android {
+-  compileSdkVersion 23
+-  buildToolsVersion "23.0.1"
++  compileSdkVersion 34
++  buildToolsVersion "34.0.0"
+   defaultConfig {
+-    minSdkVersion 16
+-    targetSdkVersion 22
++    minSdkVersion 21
++    targetSdkVersion 34
+     versionCode 1
+     versionName "1.0"
+     ndk {
+-      abiFilters "armeabi-v7a", "x86"
++      abiFilters "armeabi-v7a", "x86", "arm64-v8a", "x86_64"
+     }
+   }
+ }
+@@ -23,5 +23,5 @@ allprojects {
+ 
+ 
+ dependencies {
+-  compile 'com.facebook.react:react-native:+'
++  implementation 'com.facebook.react:react-native:+'
+ }
+\ No newline at end of file
+diff --git a/node_modules/react-native-call-detector/android/src/main/java/com/twksos/react/CallDetectorModule.java b/node_modules/react-native-call-detector/android/src/main/java/com/twksos/react/CallDetectorModule.java
+index e85beda..dc2ce99 100644
+--- a/node_modules/react-native-call-detector/android/src/main/java/com/twksos/react/CallDetectorModule.java
++++ b/node_modules/react-native-call-detector/android/src/main/java/com/twksos/react/CallDetectorModule.java
+@@ -3,7 +3,9 @@ package com.twksos.react;
+ import android.content.BroadcastReceiver;
+ import android.content.Context;
+ import android.content.Intent;
++import android.content.IntentFilter;
+ import android.telephony.TelephonyManager;
++import android.os.Build;
+ 
+ import com.facebook.react.bridge.Callback;
+ import com.facebook.react.bridge.ReactApplicationContext;
+@@ -22,7 +24,12 @@ class CallReceiver extends BroadcastReceiver {
+ 
+     @Override
+     public void onReceive(Context context, Intent intent) {
+-        this.detectorModule.notifyCallStateChange(TelephonyManager.EXTRA_STATE);
++        String state = intent.getStringExtra(TelephonyManager.EXTRA_STATE);
++        String phoneNumber = intent.getStringExtra(TelephonyManager.EXTRA_INCOMING_NUMBER);
++
++        if (state != null) {
++            this.detectorModule.notifyCallStateChange(state, phoneNumber);
++        }
+     }
+ }
+ 
+@@ -36,7 +43,7 @@ public class CallDetectorModule extends ReactContextBaseJavaModule {
+ 
+     @Override
+     public String getName() {
+-        return "RCTCallDetector";
++        return "CallDetector";
+     }
+ 
+     private static ArrayList<CallDetectorModule> modules = new ArrayList<>();
+@@ -55,18 +62,40 @@ public class CallDetectorModule extends ReactContextBaseJavaModule {
+ 
+     @ReactMethod
+     public void startListener() {
++        ReactApplicationContext context = getReactApplicationContext();
++
+         if (this.callReceiver == null) {
+             this.callReceiver = new CallReceiver(this);
++            IntentFilter filter = new IntentFilter();
++            filter.addAction(TelephonyManager.ACTION_PHONE_STATE_CHANGED);
++
++            if (Build.VERSION.SDK_INT >= 33) {
++                context.registerReceiver(this.callReceiver, filter, Context.RECEIVER_EXPORTED);
++            } else {
++                context.registerReceiver(this.callReceiver, filter);
++            }
+         }
+     }
+ 
+-    void notifyCallStateChange(String state) {
++    @ReactMethod
++    public void stopListener() {
+         ReactApplicationContext context = getReactApplicationContext();
+-        DeviceEventManagerModule.RCTDeviceEventEmitter emitter = context.getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter.class);
+-
+-        if (state.equals(TelephonyManager.EXTRA_STATE_IDLE) || state.equals(TelephonyManager.EXTRA_STATE_OFFHOOK)) { 
+-            emitter.emit("Disconnected", null); 
++        if (this.callReceiver != null) {
++            context.unregisterReceiver(this.callReceiver);
++            this.callReceiver = null;
+         }
+-        if (state.equals(TelephonyManager.EXTRA_STATE_RINGING)) emitter.emit("Disconnected", null);
++    }
++
++    void notifyCallStateChange(String state, String phoneNumber) {
++        ReactApplicationContext context = getReactApplicationContext();
++        DeviceEventManagerModule.RCTDeviceEventEmitter emitter = context
++                .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter.class);
++
++        if (state.equals(TelephonyManager.EXTRA_STATE_RINGING))
++            emitter.emit("Incoming", phoneNumber);
++        if (state.equals(TelephonyManager.EXTRA_STATE_OFFHOOK))
++            emitter.emit("Offhook", phoneNumber);
++        if (state.equals(TelephonyManager.EXTRA_STATE_IDLE))
++            emitter.emit("Disconnected", phoneNumber);
+     }
+ }
+\ No newline at end of file
+diff --git a/node_modules/react-native-call-detector/index.js b/node_modules/react-native-call-detector/index.js
+index d2535a0..f7ade35 100644
+--- a/node_modules/react-native-call-detector/index.js
++++ b/node_modules/react-native-call-detector/index.js
+@@ -1,27 +1,34 @@
+-'use strict';
++import { NativeModules, DeviceEventEmitter } from 'react-native';
+ 
+-import { NativeModules } from 'react-native';
+-import { NativeAppEventEmitter } from 'react-native';
++const { CallDetector: NativeCallDetector } = NativeModules;
+ 
+-const NativeCallDetector = NativeModules.CallDetector;
+-NativeCallDetector.startListener();
++class CallDetectorManager {
++    constructor(callback, readPhoneNumber = false) {
++        this.callback = callback;
+ 
+-class CallDetector {
+-    static listeners = {};
++        if (NativeCallDetector && NativeCallDetector.startListener) {
++            NativeCallDetector.startListener();
++        }
+ 
+-    name;
+-    subscription;
+-
+-    constructor(name, callback) {
+-        if(CallDetector.listeners[name]) CallDetector.listeners[name].dispose();
+-        CallDetector.listeners[name] = this;
+-        this.subscription = NativeAppEventEmitter.addListener('EventPhoneCallChange', callback);
++        this.subscriptions = [
++            DeviceEventEmitter.addListener('Incoming', (number) => this.callback('Incoming', number)),
++            DeviceEventEmitter.addListener('Offhook', (number) => this.callback('Offhook', number)),
++            DeviceEventEmitter.addListener('Disconnected', (number) => this.callback('Disconnected', number)),
++        ];
+     }
+ 
+     dispose() {
+-        if(this.subscription) this.subscription.remove();
+-        delete CallDetector.listeners[this.name];
++        if (this.subscriptions) {
++            this.subscriptions.forEach(sub => {
++                if (sub) sub.remove();
++            });
++            this.subscriptions = [];
++        }
++
++        if (NativeCallDetector && NativeCallDetector.stopListener) {
++            NativeCallDetector.stopListener();
++        }
+     }
+ }
+ 
+-export default module.exports = CallDetector;
+\ No newline at end of file
++export default CallDetectorManager;
+\ No newline at end of file
