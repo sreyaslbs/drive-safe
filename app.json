@@ -23,7 +23,9 @@
         "READ_CALL_LOG",
         "SEND_SMS",
         "RECEIVE_SMS",
-        "CALL_PHONE"
+        "CALL_PHONE",
+        "ACCESS_FINE_LOCATION",
+        "ACCESS_COARSE_LOCATION"
       ],
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
