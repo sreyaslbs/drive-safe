@@ -32,15 +32,11 @@ apply plugin: "expo-root-project"
 apply plugin: "com.facebook.react.rootproject"
 
 subprojects {
-    afterEvaluate { project ->
-        if (project.hasProperty('android')) {
-            if (project.android.namespace == null) {
-                if (project.name == 'react-native-call-detector') {
-                    project.android.namespace = 'com.twksos.react'
-                } else if (project.name == 'react-native-sms-android') {
-                    project.android.namespace = 'com.rhaker.reactnativesmsandroid'
-                }
-            }
+    if (project.hasProperty('android')) {
+        if (project.name == 'react-native-call-detector') {
+            project.android.namespace = 'com.twksos.react'
+        } else if (project.name == 'react-native-sms-android') {
+            project.android.namespace = 'com.rhaker.reactnativesmsandroid'
         }
     }
 }
