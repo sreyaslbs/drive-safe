@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { StyleSheet, Text, View, TouchableOpacity, SafeAreaView, StatusBar, ScrollView, Animated, Alert, PermissionsAndroid, Platform, Vibration, TextInput, LayoutAnimation, Switch } from 'react-native';
+import { StyleSheet, Text, View, TouchableOpacity, SafeAreaView, StatusBar, ScrollView, Animated, Alert, PermissionsAndroid, Platform, Vibration, TextInput, LayoutAnimation, Switch, NativeModules, NativeEventEmitter } from 'react-native';
 import * as Notifications from 'expo-notifications';
 import * as Contacts from 'expo-contacts';
 import * as Speech from 'expo-speech';
@@ -8,6 +8,9 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { callSimulator } from './src/utils/CallLogSimulation';
 import { smsHelper } from './src/utils/SMSHelper';
 import CallDetectorManager from 'react-native-call-detector';
+
+const { SMSModule } = NativeModules;
+const eventEmitter = new NativeEventEmitter(SMSModule);
 
 // Configure notifications for background alerts
 Notifications.setNotificationHandler({
@@ -31,6 +34,7 @@ export default function App() {
   const [newVip, setNewVip] = useState("");
   const [autoDecline, setAutoDecline] = useState(false);
   const [voiceCommand, setVoiceCommand] = useState(false);
+  const [whatsappEnabled, setWhatsappEnabled] = useState(false);
   const [rideHistory, setRideHistory] = useState([]);
   const [currentTripData, setCurrentTripData] = useState(null);
 
@@ -59,10 +63,31 @@ export default function App() {
     Voice.onSpeechResults = onSpeechResults;
     Voice.onSpeechError = (e) => console.log('Speech Error:', e);
 
+    // WhatsApp Listener
+    const waListener = eventEmitter.addListener('onWhatsAppCallDetected', (data) => {
+      if (isDriving && whatsappEnabled) {
+        handleWhatsAppCall(data.caller);
+      }
+    });
+
     return () => {
       Voice.destroy().then(Voice.removeAllListeners);
+      waListener.remove();
     };
-  }, []);
+  }, [isDriving, whatsappEnabled, voiceCommand]);
+
+  const handleWhatsAppCall = async (caller) => {
+    addLog(`Incoming WhatsApp Call: ${caller}`, 'info');
+
+    if (voiceCommand) {
+      Speech.speak(`Incoming WhatsApp Call from ${caller}. Since this is a WhatsApp call, I cannot answer it for you, but you can say Decline to silence it.`, {
+        onDone: () => startSST(),
+        onError: () => startSST()
+      });
+    }
+
+    updateTripCalls(caller, 'WhatsApp Call Detected');
+  };
 
   const onSpeechResults = async (e) => {
     if (e.value && e.value.length > 0) {
@@ -107,20 +132,21 @@ export default function App() {
       const settings = await AsyncStorage.getItem('app_settings');
       if (history) setRideHistory(JSON.parse(history));
       if (settings) {
-        const { msg, vip, decline, voice } = JSON.parse(settings);
+        const { msg, vip, decline, voice, whatsapp } = JSON.parse(settings);
         if (msg) setCustomMessage(msg);
         if (vip) setVipContacts(vip);
         if (decline !== undefined) setAutoDecline(decline);
         if (voice !== undefined) setVoiceCommand(voice);
+        if (whatsapp !== undefined) setWhatsappEnabled(whatsapp);
       }
     } catch (e) {
       console.error('Failed to load data', e);
     }
   };
 
-  const saveSettings = async (msg, vip, decline, voice) => {
+  const saveSettings = async (msg, vip, decline, voice, whatsapp) => {
     try {
-      await AsyncStorage.setItem('app_settings', JSON.stringify({ msg, vip, decline, voice }));
+      await AsyncStorage.setItem('app_settings', JSON.stringify({ msg, vip, decline, voice, whatsapp }));
     } catch (e) { console.error(e); }
   };
 
@@ -372,7 +398,7 @@ export default function App() {
     if (newVip.length > 5 && !vipContacts.includes(newVip)) {
       const updated = [...vipContacts, newVip];
       setVipContacts(updated);
-      saveSettings(customMessage, updated, autoDecline, voiceCommand);
+      saveSettings(customMessage, updated, autoDecline, voiceCommand, whatsappEnabled);
       setNewVip("");
     }
   };
@@ -453,7 +479,7 @@ export default function App() {
               setVoiceCommand(val);
               const newAutoDecline = val ? false : autoDecline;
               if (val) setAutoDecline(false);
-              saveSettings(customMessage, vipContacts, newAutoDecline, val);
+              saveSettings(customMessage, vipContacts, newAutoDecline, val, whatsappEnabled);
             }}
             trackColor={{ false: '#334155', true: '#3b82f6' }}
             thumbColor="#f8fafc"
@@ -473,7 +499,38 @@ export default function App() {
               setAutoDecline(val);
               const newVoiceCommand = val ? false : voiceCommand;
               if (val) setVoiceCommand(false);
-              saveSettings(customMessage, vipContacts, val, newVoiceCommand);
+              saveSettings(customMessage, vipContacts, val, newVoiceCommand, whatsappEnabled);
+            }}
+            trackColor={{ false: '#334155', true: '#3b82f6' }}
+            thumbColor="#f8fafc"
+          />
+        </View>
+
+        <View style={styles.divider} />
+
+        <View style={styles.settingRow}>
+          <View>
+            <Text style={styles.settingLabel}>WhatsApp Call Alerts</Text>
+            <Text style={styles.settingSub}>Voice identify incoming WhatsApp calls</Text>
+          </View>
+          <Switch
+            value={whatsappEnabled}
+            onValueChange={async (val) => {
+              if (val) {
+                const enabled = await smsHelper.isNotificationListenerEnabled();
+                if (!enabled) {
+                  Alert.alert(
+                    "Notification Access Required",
+                    "To detect WhatsApp calls, you need to enable 'DriveSafe' in your Notification Access settings.",
+                    [
+                      { text: "Cancel", style: "cancel", onPress: () => setWhatsappEnabled(false) },
+                      { text: "Open Settings", onPress: () => smsHelper.requestNotificationListenerPermission() }
+                    ]
+                  );
+                }
+              }
+              setWhatsappEnabled(val);
+              saveSettings(customMessage, vipContacts, autoDecline, voiceCommand, val);
             }}
             trackColor={{ false: '#334155', true: '#3b82f6' }}
             thumbColor="#f8fafc"
@@ -487,7 +544,7 @@ export default function App() {
           style={styles.textInput}
           multiline
           value={customMessage}
-          onChangeText={(val) => { setCustomMessage(val); saveSettings(val, vipContacts, autoDecline, voiceCommand); }}
+          onChangeText={(val) => { setCustomMessage(val); saveSettings(val, vipContacts, autoDecline, voiceCommand, whatsappEnabled); }}
         />
 
         <View style={styles.spacer} />
@@ -514,7 +571,7 @@ export default function App() {
               <TouchableOpacity onPress={() => {
                 const updated = vipContacts.filter(v => v !== vip);
                 setVipContacts(updated);
-                saveSettings(customMessage, updated, autoDecline, voiceCommand);
+                saveSettings(customMessage, updated, autoDecline, voiceCommand, whatsappEnabled);
               }}>
                 <Text style={styles.removeVip}>✕</Text>
               </TouchableOpacity>
