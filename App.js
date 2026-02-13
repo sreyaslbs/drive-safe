@@ -30,6 +30,11 @@ export default function App() {
   const [rideHistory, setRideHistory] = useState([]);
   const [currentTripData, setCurrentTripData] = useState(null);
 
+  // Refs for deduplication
+  const lastCallTime = useRef(0);
+  const lastCallNum = useRef(null);
+  const unknownCallTimeout = useRef(null);
+
   // Animation values
   const pulseAnim = useRef(new Animated.Value(1)).current;
   const fadeAnim = useRef(new Animated.Value(0)).current;
@@ -87,6 +92,7 @@ export default function App() {
     } else {
       pulseAnim.setValue(1);
       stopCallDetection();
+      if (unknownCallTimeout.current) clearTimeout(unknownCallTimeout.current);
     }
     return () => stopCallDetection();
   }, [isDriving]);
@@ -122,41 +128,72 @@ export default function App() {
 
     const detector = new CallDetectorManager(async (event, number) => {
       if (event === 'Incoming' || event === 'Ringing') {
+        const now = Date.now();
         const displayNum = number || 'Unknown Number';
 
-        if (number && vipContacts.some(v => number.includes(v.replace(/\s/g, '')))) {
-          addLog(`VIP Call from ${displayNum} - Ignored`, 'status');
-          updateTripCalls(displayNum, 'VIP Ignored');
+        // DEDUPLICATION: If we got a real number within 2 seconds of an unknown number,
+        // or just a duplicate event for the SAME number, ignore it.
+        if (now - lastCallTime.current < 2000) {
+          if (lastCallNum.current === displayNum) return; // Exact duplicate
+          if (lastCallNum.current && lastCallNum.current !== 'Unknown Number' && displayNum === 'Unknown Number') return; // New one is worse than old one
+        }
+
+        // Handle 'Unknown Number' Delay Fix
+        if (!number || number === 'Unknown' || number === 'Unknown Number') {
+          if (unknownCallTimeout.current) clearTimeout(unknownCallTimeout.current);
+          unknownCallTimeout.current = setTimeout(() => {
+            processIncomingCall('Unknown Number');
+          }, 800); // Wait bit to see if real number arrives
           return;
         }
 
-        addLog(`Received Call from ${displayNum}`, 'info');
-
-        if (autoDecline) {
-          addLog(`Declined Call from ${displayNum}`, 'status');
-          smsHelper.declineCallBackground();
+        // Real Number arrived! Clear any pending unknown timeout
+        if (unknownCallTimeout.current) {
+          clearTimeout(unknownCallTimeout.current);
+          unknownCallTimeout.current = null;
         }
 
-        const result = callSimulator.handleIncomingCall(number || 'Unknown');
-
-        if (result.isUrgent) {
-          addLog(`Seems Urgent Call from ${displayNum}`, 'urgent');
-          setActiveUrgentAlert(displayNum);
-          showUrgentNotification(displayNum);
-          updateTripCalls(displayNum, 'Urgent Alert');
-          Vibration.vibrate([0, 500, 200, 500, 200, 1000]);
-        } else if (result.shouldSendSMS && number && number !== 'Unknown') {
-          try {
-            const res = await smsHelper.sendSMSBackground(number, customMessage);
-            if (res.success) {
-              addLog(`Auto SMS sent to ${displayNum}`, 'info');
-              updateTripCalls(displayNum, autoDecline ? 'Declined & Replied' : 'Replied');
-            }
-          } catch (e) { }
-        }
+        processIncomingCall(number);
       }
     }, true);
     setCallDetector(detector);
+  };
+
+  const processIncomingCall = async (number) => {
+    lastCallTime.current = Date.now();
+    lastCallNum.current = number;
+
+    // VIP CHECK
+    if (number !== 'Unknown Number' && vipContacts.some(v => number.includes(v.replace(/\s/g, '')))) {
+      addLog(`VIP Call from ${number} - Ignored`, 'status');
+      updateTripCalls(number, 'VIP Ignored');
+      return;
+    }
+
+    addLog(`Received Call from ${number}`, 'info');
+
+    if (autoDecline) {
+      addLog(`Declined Call from ${number}`, 'status');
+      smsHelper.declineCallBackground();
+    }
+
+    const result = callSimulator.handleIncomingCall(number || 'Unknown');
+
+    if (result.isUrgent) {
+      addLog(`Seems Urgent Call from ${number}`, 'urgent');
+      setActiveUrgentAlert(number);
+      showUrgentNotification(number);
+      updateTripCalls(number, 'Urgent Alert');
+      Vibration.vibrate([0, 500, 200, 500, 200, 1000]);
+    } else if (result.shouldSendSMS && number !== 'Unknown Number') {
+      try {
+        const res = await smsHelper.sendSMSBackground(number, customMessage);
+        if (res.success) {
+          addLog(`Auto SMS sent to ${number}`, 'info');
+          updateTripCalls(number, autoDecline ? 'Declined & Replied' : 'Replied');
+        }
+      } catch (e) { }
+    }
   };
 
   const updateTripCalls = (number, status) => {
