@@ -449,7 +449,12 @@ export default function App() {
           </View>
           <Switch
             value={voiceCommand}
-            onValueChange={(val) => { setVoiceCommand(val); saveSettings(customMessage, vipContacts, autoDecline, val); }}
+            onValueChange={(val) => {
+              setVoiceCommand(val);
+              const newAutoDecline = val ? false : autoDecline;
+              if (val) setAutoDecline(false);
+              saveSettings(customMessage, vipContacts, newAutoDecline, val);
+            }}
             trackColor={{ false: '#334155', true: '#3b82f6' }}
             thumbColor="#f8fafc"
           />
@@ -464,8 +469,12 @@ export default function App() {
           </View>
           <Switch
             value={autoDecline}
-            disabled={voiceCommand} // Voice command takes precedence or should be mutually exclusive? 
-            onValueChange={(val) => { setAutoDecline(val); saveSettings(customMessage, vipContacts, val, voiceCommand); }}
+            onValueChange={(val) => {
+              setAutoDecline(val);
+              const newVoiceCommand = val ? false : voiceCommand;
+              if (val) setVoiceCommand(false);
+              saveSettings(customMessage, vipContacts, val, newVoiceCommand);
+            }}
             trackColor={{ false: '#334155', true: '#3b82f6' }}
             thumbColor="#f8fafc"
           />
