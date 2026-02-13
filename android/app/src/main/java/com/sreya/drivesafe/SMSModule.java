@@ -74,4 +74,25 @@ public class SMSModule extends ReactContextBaseJavaModule {
             promise.reject("ERROR", e.getMessage());
         }
     }
+
+    @ReactMethod
+    public void acceptCall(Promise promise) {
+        try {
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                TelecomManager telecomManager = (TelecomManager) getReactApplicationContext().getSystemService(Context.TELECOM_SERVICE);
+                if (telecomManager != null) {
+                    telecomManager.acceptRingingCall();
+                    promise.resolve("Call accepted");
+                } else {
+                    promise.reject("TELECOM_MANAGER_NULL", "TelecomManager unavailable");
+                }
+            } else {
+                promise.reject("API_LOW", "Accept call not supported on this Android version");
+            }
+        } catch (SecurityException e) {
+            promise.reject("SECURITY_ERROR", "Missing ANSWER_PHONE_CALLS permission: " + e.getMessage());
+        } catch (Exception e) {
+            promise.reject("ERROR", e.getMessage());
+        }
+    }
 }

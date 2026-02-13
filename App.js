@@ -1,6 +1,9 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { StyleSheet, Text, View, TouchableOpacity, SafeAreaView, StatusBar, ScrollView, Animated, Alert, PermissionsAndroid, Platform, Vibration, TextInput, LayoutAnimation, Switch } from 'react-native';
 import * as Notifications from 'expo-notifications';
+import * as Contacts from 'expo-contacts';
+import * as Speech from 'expo-speech';
+import Voice from '@react-native-voice/voice';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { callSimulator } from './src/utils/CallLogSimulation';
 import { smsHelper } from './src/utils/SMSHelper';
@@ -27,13 +30,15 @@ export default function App() {
   const [vipContacts, setVipContacts] = useState([]);
   const [newVip, setNewVip] = useState("");
   const [autoDecline, setAutoDecline] = useState(false);
+  const [voiceCommand, setVoiceCommand] = useState(false);
   const [rideHistory, setRideHistory] = useState([]);
   const [currentTripData, setCurrentTripData] = useState(null);
 
-  // Refs for deduplication
+  // Refs for deduplication and performance
   const lastCallTime = useRef(0);
   const lastCallNum = useRef(null);
   const unknownCallTimeout = useRef(null);
+  const isListeningRef = useRef(false);
 
   // Animation values
   const pulseAnim = useRef(new Animated.Value(1)).current;
@@ -48,7 +53,53 @@ export default function App() {
 
     loadPersistentData();
     requestNotificationPermissions();
+    requestContactPermissions();
+
+    // Voice setup
+    Voice.onSpeechResults = onSpeechResults;
+    Voice.onSpeechError = (e) => console.log('Speech Error:', e);
+
+    return () => {
+      Voice.destroy().then(Voice.removeAllListeners);
+    };
   }, []);
+
+  const onSpeechResults = async (e) => {
+    if (e.value && e.value.length > 0) {
+      const result = e.value[0].toLowerCase();
+      addLog(`Voice detected: "${result}"`, 'info');
+
+      if (result.includes('answer') || result.includes('accept')) {
+        addLog('Voice Command: Answering Call', 'status');
+        smsHelper.acceptCallBackground();
+        stopSST();
+      } else if (result.includes('decline') || result.includes('reject') || result.includes('no')) {
+        addLog('Voice Command: Declining Call', 'status');
+        smsHelper.declineCallBackground();
+        stopSST();
+      }
+    }
+  };
+
+  const startSST = async () => {
+    if (isListeningRef.current) return;
+    try {
+      isListeningRef.current = true;
+      await Voice.start('en-US');
+    } catch (e) {
+      console.error('STT Start failed', e);
+      isListeningRef.current = false;
+    }
+  };
+
+  const stopSST = async () => {
+    try {
+      await Voice.stop();
+      isListeningRef.current = false;
+    } catch (e) {
+      console.error('STT Stop failed', e);
+    }
+  };
 
   const loadPersistentData = async () => {
     try {
@@ -56,19 +107,20 @@ export default function App() {
       const settings = await AsyncStorage.getItem('app_settings');
       if (history) setRideHistory(JSON.parse(history));
       if (settings) {
-        const { msg, vip, decline } = JSON.parse(settings);
+        const { msg, vip, decline, voice } = JSON.parse(settings);
         if (msg) setCustomMessage(msg);
         if (vip) setVipContacts(vip);
         if (decline !== undefined) setAutoDecline(decline);
+        if (voice !== undefined) setVoiceCommand(voice);
       }
     } catch (e) {
       console.error('Failed to load data', e);
     }
   };
 
-  const saveSettings = async (msg, vip, decline) => {
+  const saveSettings = async (msg, vip, decline, voice) => {
     try {
-      await AsyncStorage.setItem('app_settings', JSON.stringify({ msg, vip, decline }));
+      await AsyncStorage.setItem('app_settings', JSON.stringify({ msg, vip, decline, voice }));
     } catch (e) { console.error(e); }
   };
 
@@ -77,6 +129,36 @@ export default function App() {
     if (status !== 'granted' && Platform.OS !== 'web') {
       addLog('Notification access restricted', 'info');
     }
+  };
+
+  const requestContactPermissions = async () => {
+    const { status } = await Contacts.requestPermissionsAsync();
+    if (status !== 'granted') {
+      console.log('Contacts permission denied');
+    }
+  };
+
+  const getContactName = async (phoneNumber) => {
+    if (!phoneNumber || phoneNumber === 'Unknown Number') return phoneNumber;
+    try {
+      const { data } = await Contacts.getContactsAsync({
+        fields: [Contacts.Fields.Name, Contacts.Fields.PhoneNumbers],
+      });
+
+      if (data.length > 0) {
+        const cleanIncoming = phoneNumber.replace(/[^\d]/g, '');
+        const contact = data.find(c =>
+          c.phoneNumbers && c.phoneNumbers.some(p => {
+            const cleanStored = p.number.replace(/[^\d]/g, '');
+            return cleanStored.endsWith(cleanIncoming) || cleanIncoming.endsWith(cleanStored);
+          })
+        );
+        return contact ? contact.name : phoneNumber;
+      }
+    } catch (e) {
+      console.error('Contact search failed', e);
+    }
+    return phoneNumber;
   };
 
   useEffect(() => {
@@ -104,6 +186,8 @@ export default function App() {
         PermissionsAndroid.PERMISSIONS.READ_CALL_LOG,
         PermissionsAndroid.PERMISSIONS.SEND_SMS,
         PermissionsAndroid.PERMISSIONS.ANSWER_PHONE_CALLS,
+        PermissionsAndroid.PERMISSIONS.READ_CONTACTS,
+        PermissionsAndroid.PERMISSIONS.RECORD_AUDIO,
       ];
       if (Platform.Version >= 33) permissions.push(PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS);
       if (Platform.Version >= 30) permissions.push(PermissionsAndroid.PERMISSIONS.READ_PHONE_NUMBERS);
@@ -112,7 +196,9 @@ export default function App() {
       return (
         granted[PermissionsAndroid.PERMISSIONS.READ_PHONE_STATE] === PermissionsAndroid.RESULTS.GRANTED &&
         granted[PermissionsAndroid.PERMISSIONS.READ_CALL_LOG] === PermissionsAndroid.RESULTS.GRANTED &&
-        granted[PermissionsAndroid.PERMISSIONS.SEND_SMS] === PermissionsAndroid.RESULTS.GRANTED
+        granted[PermissionsAndroid.PERMISSIONS.SEND_SMS] === PermissionsAndroid.RESULTS.GRANTED &&
+        granted[PermissionsAndroid.PERMISSIONS.READ_CONTACTS] === PermissionsAndroid.RESULTS.GRANTED &&
+        granted[PermissionsAndroid.PERMISSIONS.RECORD_AUDIO] === PermissionsAndroid.RESULTS.GRANTED
       );
     }
     return true;
@@ -121,7 +207,7 @@ export default function App() {
   const startCallDetection = async () => {
     const hasPermission = await requestPermissions();
     if (!hasPermission) {
-      Alert.alert('Permission Required', 'Enable Phone, Call logs, and SMS permissions to protect your drive.');
+      Alert.alert('Permission Required', 'Enable Phone, Call logs, SMS, and Microphone permissions to protect your drive.');
       setIsDriving(false);
       return;
     }
@@ -154,6 +240,9 @@ export default function App() {
         }
 
         processIncomingCall(number);
+      } else if (event === 'Disconnected' || event === 'Offhook') {
+        stopSST();
+        Speech.stop();
       }
     }, true);
     setCallDetector(detector);
@@ -163,34 +252,44 @@ export default function App() {
     lastCallTime.current = Date.now();
     lastCallNum.current = number;
 
+    const callerIdentifier = await getContactName(number);
+
     // VIP CHECK
     if (number !== 'Unknown Number' && vipContacts.some(v => number.includes(v.replace(/\s/g, '')))) {
-      addLog(`VIP Call from ${number} - Ignored`, 'status');
-      updateTripCalls(number, 'VIP Ignored');
+      addLog(`VIP Call from ${callerIdentifier} - Ignored`, 'status');
+      updateTripCalls(callerIdentifier, 'VIP Ignored');
       return;
     }
 
-    addLog(`Received Call from ${number}`, 'info');
+    addLog(`Received Call from ${callerIdentifier}`, 'info');
 
-    if (autoDecline) {
-      addLog(`Declined Call from ${number}`, 'status');
+    // Voice Script Logic
+    if (voiceCommand) {
+      Speech.speak(`Call from ${callerIdentifier}. Say Answer or Decline.`, {
+        onDone: () => startSST(),
+        onError: () => startSST() // Fallback
+      });
+    }
+
+    if (autoDecline && !voiceCommand) {
+      addLog(`Declined Call from ${callerIdentifier}`, 'status');
       smsHelper.declineCallBackground();
     }
 
     const result = callSimulator.handleIncomingCall(number || 'Unknown');
 
     if (result.isUrgent) {
-      addLog(`Seems Urgent Call from ${number}`, 'urgent');
-      setActiveUrgentAlert(number);
-      showUrgentNotification(number);
-      updateTripCalls(number, 'Urgent Alert');
+      addLog(`Seems Urgent Call from ${callerIdentifier}`, 'urgent');
+      setActiveUrgentAlert(callerIdentifier);
+      showUrgentNotification(callerIdentifier);
+      updateTripCalls(callerIdentifier, 'Urgent Alert');
       Vibration.vibrate([0, 500, 200, 500, 200, 1000]);
     } else if (result.shouldSendSMS && number !== 'Unknown Number') {
       try {
         const res = await smsHelper.sendSMSBackground(number, customMessage);
         if (res.success) {
-          addLog(`Auto SMS sent to ${number}`, 'info');
-          updateTripCalls(number, autoDecline ? 'Declined & Replied' : 'Replied');
+          addLog(`Auto SMS sent to ${callerIdentifier}`, 'info');
+          updateTripCalls(callerIdentifier, autoDecline ? 'Declined & Replied' : 'Replied');
         }
       } catch (e) { }
     }
@@ -253,9 +352,6 @@ export default function App() {
         await AsyncStorage.setItem('ride_history', JSON.stringify(newHistory));
       }
       setActiveUrgentAlert(null);
-      // Auto-clear logs after stopping is handled by the becomingActive logic above next time we start
-      // But user wanted "After every ride is stopped, logs could be auto cleared"
-      // So let's clear them after a short delay so they can see "Ride Ended"
       setTimeout(() => {
         if (!becomingActive) setLogs([]);
       }, 3000);
@@ -276,7 +372,7 @@ export default function App() {
     if (newVip.length > 5 && !vipContacts.includes(newVip)) {
       const updated = [...vipContacts, newVip];
       setVipContacts(updated);
-      saveSettings(customMessage, updated, autoDecline);
+      saveSettings(customMessage, updated, autoDecline, voiceCommand);
       setNewVip("");
     }
   };
@@ -348,12 +444,28 @@ export default function App() {
       <View style={styles.settingsCard}>
         <View style={styles.settingRow}>
           <View>
+            <Text style={styles.settingLabel}>Accept via Voice</Text>
+            <Text style={styles.settingSub}>Say "Answer" or "Decline" when called</Text>
+          </View>
+          <Switch
+            value={voiceCommand}
+            onValueChange={(val) => { setVoiceCommand(val); saveSettings(customMessage, vipContacts, autoDecline, val); }}
+            trackColor={{ false: '#334155', true: '#3b82f6' }}
+            thumbColor="#f8fafc"
+          />
+        </View>
+
+        <View style={styles.divider} />
+
+        <View style={styles.settingRow}>
+          <View>
             <Text style={styles.settingLabel}>Auto-Decline Calls</Text>
             <Text style={styles.settingSub}>Hang up the first call automatically</Text>
           </View>
           <Switch
             value={autoDecline}
-            onValueChange={(val) => { setAutoDecline(val); saveSettings(customMessage, vipContacts, val); }}
+            disabled={voiceCommand} // Voice command takes precedence or should be mutually exclusive? 
+            onValueChange={(val) => { setAutoDecline(val); saveSettings(customMessage, vipContacts, val, voiceCommand); }}
             trackColor={{ false: '#334155', true: '#3b82f6' }}
             thumbColor="#f8fafc"
           />
@@ -366,7 +478,7 @@ export default function App() {
           style={styles.textInput}
           multiline
           value={customMessage}
-          onChangeText={(val) => { setCustomMessage(val); saveSettings(val, vipContacts, autoDecline); }}
+          onChangeText={(val) => { setCustomMessage(val); saveSettings(val, vipContacts, autoDecline, voiceCommand); }}
         />
 
         <View style={styles.spacer} />
@@ -393,7 +505,7 @@ export default function App() {
               <TouchableOpacity onPress={() => {
                 const updated = vipContacts.filter(v => v !== vip);
                 setVipContacts(updated);
-                saveSettings(customMessage, updated, autoDecline);
+                saveSettings(customMessage, updated, autoDecline, voiceCommand);
               }}>
                 <Text style={styles.removeVip}>✕</Text>
               </TouchableOpacity>
@@ -468,6 +580,7 @@ const styles = StyleSheet.create({
   settingRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
   settingLabel: { color: '#f8fafc', fontSize: 16, fontWeight: 'bold' },
   settingSub: { color: '#64748b', fontSize: 11, marginTop: 2 },
+  divider: { height: 1, backgroundColor: '#ffffff05', marginVertical: 15 },
   spacer: { height: 30 },
   inputLabel: { color: '#64748b', fontSize: 10, fontWeight: '900', marginBottom: 12, letterSpacing: 1 },
   textInput: { backgroundColor: '#0f172a', color: '#f8fafc', padding: 16, borderRadius: 16, fontSize: 14, minHeight: 100, textAlignVertical: 'top' },

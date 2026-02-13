@@ -89,6 +89,24 @@ class SMSHelper {
             return { success: false, error: error.message };
         }
     }
+
+    /**
+     * Answers an incoming call using native module
+     */
+    async acceptCallBackground() {
+        try {
+            const { NativeModules } = require('react-native');
+            const { SMSModule } = NativeModules;
+            if (SMSModule && SMSModule.acceptCall) {
+                await SMSModule.acceptCall();
+                return { success: true };
+            }
+            return { success: false, error: 'Accept feature not available' };
+        } catch (error) {
+            return { success: false, error: error.message };
+        }
+    }
+
 }
 
 export const smsHelper = new SMSHelper();
