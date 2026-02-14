@@ -107,32 +107,6 @@ class SMSHelper {
         }
     }
 
-    /**
-     * Checks if notification listener is enabled
-     */
-    async isNotificationListenerEnabled() {
-        try {
-            const { NativeModules } = require('react-native');
-            const { SMSModule } = NativeModules;
-            if (SMSModule && SMSModule.isNotificationListenerEnabled) {
-                return await SMSModule.isNotificationListenerEnabled();
-            }
-            return false;
-        } catch (error) {
-            return false;
-        }
-    }
-
-    /**
-     * Opens notification listener settings
-     */
-    requestNotificationListenerPermission() {
-        const { NativeModules } = require('react-native');
-        const { SMSModule } = NativeModules;
-        if (SMSModule && SMSModule.requestNotificationListenerPermission) {
-            SMSModule.requestNotificationListenerPermission();
-        }
-    }
 }
 
 export const smsHelper = new SMSHelper();
